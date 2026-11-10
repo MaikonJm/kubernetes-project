@@ -1,77 +1,107 @@
-# Orquestração com Kubernetes
+# Kubernetes Orchestration: Deployment, Ingress & Autoscaling
 
-Este projeto demonstra a implementação de uma aplicação em Kubernetes com foco em orquestração. Foi configurado um cluster local utilizando Minikube/Kind e realizado o deploy de uma aplicação, expondo-a através de serviços e controladores no Kubernetes. A configuração inclui:
+> Deploys a containerized web app on a local Kubernetes cluster (Minikube/Kind) with configuration management, health checks, Ingress routing and CPU-based **Horizontal Pod Autoscaling**. Manifests are validated in CI.
 
-* Arquivos Deployment, Service e Ingress para expor a aplicação.
-* Configuração de ConfigMaps, Secrets e Autoescala (Horizontal Pod Autoscaler) para gerenciamento de configurações e escalabilidade automática.
-* Cluster local configurado com Minikube/Kind.
+![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?logo=kubernetes&logoColor=white)
+![Minikube](https://img.shields.io/badge/Minikube-F7B93E?logo=kubernetes&logoColor=black)
+![CI](https://github.com/MaikonJm/kubernetes-project/actions/workflows/validate.yml/badge.svg)
 
+## TL;DR
 
-## Funcionalidades
+| | |
+|---|---|
+| **What** | Namespace, Deployment, Service, Ingress, ConfigMap, Secret and HPA for a web app (NGINX), plus an optional admin user for the Kubernetes Dashboard |
+| **Stack** | Kubernetes · Minikube or Kind · NGINX Ingress Controller · metrics-server · GitHub Actions + kubeconform |
+| **Result** | App scales automatically from **2 to 5 replicas** when average CPU passes 50% |
 
-* Deploy de Aplicações: Arquivos YAML para o deploy de uma aplicação no Kubernetes.
-* Exposição de Aplicações: Utilização de Ingress e Service para expor a aplicação para acessos externos.
-* Configuração de Autoscalabilidade: Utilização de Horizontal Pod Autoscaler para ajustar automaticamente o número de réplicas dos pods.
-* Segurança e Configurações: Uso de Secrets e ConfigMaps para gerenciar informações sensíveis e configurações externas.
-  
-##Estrutura do Projeto
+## Architecture
 
-```bash
-kubernetes-project/
-│
-├── k8s/
-│   ├── deployment.yaml           # Arquivo de Deployment
-│   ├── service.yaml              # Arquivo de Service
-│   ├── ingress.yaml              # Arquivo de Ingress
-│   ├── configmap.yaml            # Arquivo de ConfigMap
-│   ├── secret.yaml               # Arquivo de Secret
-│   ├── autoscale.yaml            # Arquivo de Horizontal Pod Autoscaler
-│   ├── namespace.yaml            # Arquivo para criar namespace
-│
-└── README.md                     # Documentação do projeto
-
+```text
+client ──► Ingress (my-app.local) ──► Service (ClusterIP) ──► Pods (Deployment, 2–5 replicas)
+                                                                  ▲
+                                         HPA (CPU 50%) ───────────┘
+                                         ConfigMap + Secret ──► env vars
 ```
-## Pré-requisitos
 
-* Minikube ou Kind para cluster local Kubernetes.
-* kubectl para interagir com o cluster.
+### Key design decisions
 
-## Instalação
+- **CPU requests and limits on the container.** The HPA calculates utilization as a percentage of the *request*; without requests, autoscaling never triggers.
+- **Readiness and liveness probes.** Traffic only reaches pods that are ready, and stuck pods are restarted automatically.
+- **Service as `ClusterIP` + Ingress.** One entry point with host-based routing instead of a LoadBalancer per service.
+- **Pinned image tag** (`nginx:1.27-alpine`) instead of `:latest`, for reproducible deployments.
+- **Dedicated namespace** (`my-app`) to isolate the app's resources.
+- **Configuration outside the image.** Settings come from a ConfigMap and the password from a Secret, both injected as environment variables.
 
-1. Instalar Minikube ou Kind
+## Repository structure
 
-2. Iniciar o Cluster:
+```text
+k8s/
+├── namespace.yaml        # my-app namespace
+├── deployment.yaml       # app pods: resources, probes, env from ConfigMap/Secret
+├── service.yaml          # ClusterIP service
+├── ingress.yaml          # host-based routing (my-app.local)
+├── configmap.yaml        # non-sensitive configuration
+├── secrets.yaml          # example Secret (placeholder value)
+├── hpa.yaml              # Horizontal Pod Autoscaler (CPU 50%, 2–5 replicas)
+└── dashboard/            # optional: admin user for the Kubernetes Dashboard
+    ├── admin-user.yaml
+    └── admin-user-binding.yaml
+```
 
-  * Se estiver usando Minikube:
-  ```bash
-    minikube start
-  ```
-  * Se estiver usando Kind:
-  ```bash
-    kind create cluster
-  ```
+## How to run (Minikube)
 
-3. Aplicar os Arquivos de Configuração:
-
-* Execute os seguintes comandos para aplicar os arquivos de configuração no seu cluster Kubernetes:
-  ```bash
-    kubectl apply -f k8s/namespace.yaml
-    kubectl apply -f k8s/deployment.yaml
-    kubectl apply -f k8s/service.yaml
-    kubectl apply -f k8s/ingress.yaml
-    kubectl apply -f k8s/configmap.yaml
-    kubectl apply -f k8s/secret.yaml
-    kubectl apply -f k8s/autoscale.yaml
-  ```
-
-4. Acessar a Aplicação:
-
-* Após a aplicação ser implantada, você pode acessar a aplicação usando o Ingress configurado ou através do port-forwarding:
- ```bash
-    kubectl port-forward svc/kubernetes-dashboard 8001:443 -n kubernetes-dashboard
- ```
-5. Verificar a Escalabilidade:
-
-* O Horizontal Pod Autoscaler foi configurado para ajustar automaticamente o número de pods com base na carga. Você pode verificar o status com:
 ```bash
-kubectl get hpa
+minikube start
+minikube addons enable ingress
+minikube addons enable metrics-server   # required by the HPA
+
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/
+
+kubectl get pods,svc,ingress,hpa -n my-app
+```
+
+Add `$(minikube ip) my-app.local` to your `/etc/hosts` and open `http://my-app.local`.
+Quick alternative: `kubectl port-forward svc/my-app-service 8080:80 -n my-app`, then open `http://localhost:8080`.
+
+### Test the autoscaling
+
+```bash
+# generate load from inside the cluster
+kubectl run load -n my-app --rm -it --image=busybox:1.36 --restart=Never -- \
+  /bin/sh -c "while true; do wget -q -O- http://my-app-service; done"
+
+# in another terminal: watch replicas go up
+kubectl get hpa -n my-app -w
+```
+
+### Optional: Kubernetes Dashboard
+
+```bash
+minikube addons enable dashboard
+kubectl apply -f k8s/dashboard/
+kubectl -n kubernetes-dashboard create token admin-user
+minikube dashboard
+```
+
+> ⚠️ `admin-user` is bound to `cluster-admin`. Use it only in a local lab, never on a shared or production cluster.
+
+## Security notes
+
+- `secrets.yaml` contains only a placeholder. In real environments, create Secrets with `kubectl create secret` or a secret manager (Sealed Secrets, External Secrets + AWS Secrets Manager), and never commit them.
+- Kubernetes Secrets are only base64-encoded, not encrypted. Encryption at rest and RBAC are needed in production.
+
+## CI
+
+Every push and pull request runs **kubeconform** in strict mode against the Kubernetes API schemas, catching invalid fields and typos before anything reaches a cluster.
+
+## Roadmap
+
+- [ ] Replace NGINX with a custom app image built and pushed by CI
+- [ ] Package with Helm or Kustomize (dev/prod overlays)
+- [ ] Deploy to a managed cluster (EKS or AKS)
+- [ ] Network Policies and Pod Security Standards
+
+---
+
+**Maikon Marquez** · Cloud & DevOps Engineer · [LinkedIn](https://www.linkedin.com/in/maikon-marquez) · [Medium](https://medium.com/@maikonjm)
